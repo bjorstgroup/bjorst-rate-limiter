@@ -3,5 +3,5 @@ name = "bjorst-rate-limiter"
 version = "0.1.0"
 edition = "2021"
 authors = ["Bjorst Engineering <engineering@bjorst.com>"]
-license = "UNLICENSED"
+license = "MIT"
 description = "Per-IP sliding-window rate limiter (in-memory)"
