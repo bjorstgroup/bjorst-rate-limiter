@@ -1,4 +1,10 @@
-//! Per-IP sliding-window rate limiter (in-memory).
+//! Sliding-window rate limiter (in-memory), keyed by IP address or by
+//! anything else.
+//!
+//! The key defaults to [`IpAddr`], which is what the limiter was first written
+//! for. Any `Hash + Eq + Clone` key works: an account, an email address, a
+//! `(route, ip)` pair. An address limit alone does not stop an attack spread
+//! across many addresses, so a sign-in usually wants one of each.
 //!
 //! ## Design
 //!
@@ -24,14 +30,17 @@
 //! ```
 
 use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
 use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-pub struct RateLimiter {
+/// A sliding-window limit per key: at most `max_requests` within any
+/// `window`. The key defaults to [`IpAddr`].
+pub struct RateLimiter<K = IpAddr> {
     max_requests: u32,
     window: Duration,
-    buckets: Mutex<HashMap<IpAddr, VecDeque<Instant>>>,
+    buckets: Mutex<HashMap<K, VecDeque<Instant>>>,
 }
 
 /// Outcome of a rate-limit check. Carry values to `RateLimit-*` response headers.
@@ -43,7 +52,8 @@ pub struct RateCheck {
     pub reset_unix: u64,
 }
 
-impl RateLimiter {
+impl<K: Hash + Eq> RateLimiter<K> {
+    /// At most `max_requests` per key within any `window`.
     pub fn new(max_requests: u32, window: Duration) -> Self {
         Self {
             max_requests,
@@ -53,15 +63,20 @@ impl RateLimiter {
     }
 
     /// Returns `Ok(info)` if the request is allowed, `Err(info)` if denied.
-    pub fn check(&self, ip: IpAddr) -> Result<RateCheck, RateCheck> {
+    /// A denied request is not counted.
+    pub fn check(&self, key: K) -> Result<RateCheck, RateCheck> {
         let now = Instant::now();
-        let cutoff = now - self.window;
         let mut buckets = self.buckets.lock().expect("rate limiter poisoned");
 
-        let entries = buckets.entry(ip).or_default();
+        let entries = buckets.entry(key).or_default();
 
-        while entries.front().is_some_and(|t| *t < cutoff) {
-            entries.pop_front();
+        // `checked_sub`: a window longer than the monotonic clock has been
+        // running (a freshly booted host) would otherwise panic. Nothing can
+        // have expired yet in that case.
+        if let Some(cutoff) = now.checked_sub(self.window) {
+            while entries.front().is_some_and(|t| *t < cutoff) {
+                entries.pop_front();
+            }
         }
 
         let reset_unix =
@@ -83,9 +98,12 @@ impl RateLimiter {
         })
     }
 
-    /// Remove IPs whose entire window has expired. Call periodically from a background task.
+    /// Remove keys whose entire window has expired. Call periodically from a
+    /// background task.
     pub fn gc(&self) {
-        let cutoff = Instant::now() - self.window;
+        let Some(cutoff) = Instant::now().checked_sub(self.window) else {
+            return;
+        };
         let mut buckets = self.buckets.lock().expect("rate limiter poisoned");
         buckets.retain(|_, entries| {
             while entries.front().is_some_and(|t| *t < cutoff) {
@@ -145,6 +163,38 @@ mod tests {
         assert_eq!(info.remaining, 4);
         let info = rl.check(ip).unwrap();
         assert_eq!(info.remaining, 3);
+    }
+
+    #[test]
+    fn any_hashable_key_works() {
+        let rl: RateLimiter<String> = RateLimiter::new(1, Duration::from_secs(3600));
+
+        assert!(rl.check("ada@example.com".to_owned()).is_ok());
+        assert!(rl.check("ada@example.com".to_owned()).is_err());
+        assert!(rl.check("bo@example.com".to_owned()).is_ok());
+    }
+
+    #[test]
+    fn a_denied_request_is_not_counted() {
+        let rl = RateLimiter::new(1, Duration::from_millis(20));
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        assert!(rl.check(ip).is_ok());
+        for _ in 0..5 {
+            assert!(rl.check(ip).is_err());
+        }
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(rl.check(ip).is_ok(), "denials extended the window");
+    }
+
+    #[test]
+    fn a_window_longer_than_uptime_does_not_panic() {
+        let rl = RateLimiter::new(1, Duration::from_secs(u64::MAX / 4));
+        let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
+
+        assert!(rl.check(ip).is_ok());
+        assert!(rl.check(ip).is_err());
+        rl.gc();
     }
 
     #[test]
