@@ -1,7 +1,7 @@
 [package]
 name = "bjorst-rate-limiter"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["Bjorst Engineering <engineering@bjorst.com>"]
 license = "MIT"
-description = "Per-IP sliding-window rate limiter (in-memory)"
+description = "Sliding-window rate limiter (in-memory), keyed by IP or anything hashable"

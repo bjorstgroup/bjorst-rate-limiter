@@ -1,12 +1,13 @@
 # bjorst-rate-limiter
 
-Per-IP sliding-window rate limiter (in-memory).
+Sliding-window rate limiter (in-memory), keyed by IP address or by anything
+hashable.
 
 ## Usage
 
 ```toml
 [dependencies]
-bjorst-rate-limiter = { git = "https://github.com/bjorstgroup/bjorst-rate-limiter" }
+bjorst-rate-limiter = { git = "https://github.com/bjorstgroup/bjorst-rate-limiter", tag = "v0.2.0" }
 ```
 
 ```rust
@@ -29,7 +30,20 @@ match limiter.check(client_ip) {
 }
 ```
 
+### Any key
+
+The key defaults to `IpAddr`. Anything `Hash + Eq` works, such as an account or an
+email address. An address limit alone does not stop an attack spread across many
+addresses, so a sign-in usually wants both:
+
+```rust
+let per_ip: RateLimiter = RateLimiter::new(20, Duration::from_secs(900));
+let per_account: RateLimiter<String> = RateLimiter::new(10, Duration::from_secs(900));
+```
+
 ## Notes
+
+- A denied request is not counted, so hammering a closed door does not keep it closed.
 
 - **Sliding window** (not fixed bucket) — prevents burst-at-boundary attacks.
 - **In-memory** — suitable for single-instance deployments. For horizontal scaling, replace with Redis sorted sets.
